@@ -141,8 +141,8 @@ func spray() {
 			file_entry := scanner.Text()
 			res := regexp.MustCompile(`^\d{12}:`)
 			if strings.Contains(file_entry, "arn:aws:iam::") {
-				user.UserName = strings.Split(file_entry, ":")[4]
-				user.AccountID = strings.Split(file_entry, "/")[1]
+				user.UserName = strings.Split(file_entry, "/")[2]
+				user.AccountID = strings.Split(file_entry, ":")[4]
 			} else if res.FindString(file_entry) != "" {
 				user.UserName = strings.Split(file_entry, ":")[1]
 				user.AccountID = strings.Split(file_entry, ":")[0]
