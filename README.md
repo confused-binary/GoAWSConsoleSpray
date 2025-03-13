@@ -10,6 +10,36 @@ GoAWSConsoleSpray is a tool that can be used to spray AWS IAM Console Credential
 
 By default, AWS prompts to generate user passwords using a random secure string. However, user's might change these passwords and organizations may modify their password policy to be insecure (or a legacy AWS deployment that has had a poor password policy for a long time).
 
+## Help
+
+```
+> $ GoAWSConsoleSpray --help
+
+        GoAWSConsoleSpray is used to spray AWS IAM console credentials from
+        a list of usernames and passwords. The tool will detect valid usernames
+        if those accounts are configured with MFA enabled. If no MFA, it will 
+        detect successful login attempts. Accounts configured with MFA cannot
+        be sprayed at this time.
+
+        Example: GoAWSConsoleSpray -u users.txt -p pws.txt -a 123456789012
+
+Usage:
+  GoAWSConsoleSpray [flags]
+
+Flags:
+  -a, --accountID string   AWS Account ID (required unless username is ARN)
+  -d, --delay int          Optional Time Delay between login requests
+  -h, --help               help for GoAWSConsoleSpray
+  -j, --jitter int         Optional Time Jitter Between Requests (0 to n)
+  -p, --passfile string    Password string or file (required)
+  -x, --proxy string       HTTP or Socks proxy URL & Port. Schema: proto://ip:port
+  -z, --sleep int          Optional Time to sleep between spraying each a password 
+  -s, --stopOnSuccess      Stop password spraying on successful hit
+  -U, --userAgent string   Optional User-Agent header (default "GoAWSConsoleSpray")
+  -u, --userfile string    Username string or file (required) can be user, arn, or acctId:user format
+  -w, --workers int        Optional Time to sleep between password requests (default 5)
+```
+
 ## Usage
 
 `./GoAWSConsoleSpray -a ACCOUNTID -u users.txt -p pws.txt`
