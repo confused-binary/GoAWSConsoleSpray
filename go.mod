@@ -1,4 +1,4 @@
-module github.com/WhiteOakSecurity/GoAWSConsoleSpray
+module github.com/confused-binary/GoAWSConsoleSpray
 
 go 1.17
 

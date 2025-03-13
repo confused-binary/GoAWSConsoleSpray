@@ -18,11 +18,11 @@ By default, AWS prompts to generate user passwords using a random secure string.
 
 Requires go 1.17+
 
-`go install github.com/WhiteOakSecurity/GoAWSConsoleSpray@latest`
+`go install github.com/confused-binary/GoAWSConsoleSpray@latest`
 
 ## Build
 
-`git clone git@github.com:WhiteOakSecurity/GoAWSConsoleSpray.git`
+`git clone git@github.com:confused-binary/GoAWSConsoleSpray.git`
 
 Download project dependencies: `make dep`
 

@@ -2,7 +2,7 @@
 package main
 
 import (
-	"github.com/WhiteOakSecurity/GoAWSConsoleSpray/cmd"
+	"github.com/confused-binary/GoAWSConsoleSpray/cmd"
 )
 
 func main() {
