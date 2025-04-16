@@ -14,4 +14,4 @@ require (
 	golang.org/x/text v0.3.6 // indirect
 )
 
-replace github.com/WhiteOakSecurity/GoAWSConsoleSpray => github.com/confused-binary/GoAWSConsoleSpray latest
+replace github.com/WhiteOakSecurity/GoAWSConsoleSpray => github.com/confused-binary/GoAWSConsoleSpray v1.0.0
