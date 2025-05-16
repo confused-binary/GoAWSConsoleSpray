@@ -106,58 +106,59 @@ func init() {
 
 func readUserDetails(fUserfile string, fAccountID string) ([]userDetails, error) {
 	var usernameList []userDetails
-	var userString string
 
-	userfileHandle, err := os.Open(fUserfile)
-	if err != nil {
-		userString = fUserfile
-	}
-	defer userfileHandle.Close()
-
-	if len(userString) == 0 {
-		scanner := bufio.NewScanner(userfileHandle)
+	// Try to open as a file
+	file, err := os.Open(fUserfile)
+	if err == nil {
+		defer file.Close()
+		scanner := bufio.NewScanner(file)
 		for scanner.Scan() {
-			var user userDetails
-			file_entry := scanner.Text()
-			res := regexp.MustCompile(`^\d{12}:`)
-			if strings.Contains(file_entry, "arn:aws:iam::") {
-				user.UserName = strings.Split(file_entry, "/")[2]
-				user.AccountID = strings.Split(file_entry, ":")[4]
-			} else if res.FindString(file_entry) != "" {
-				user.UserName = strings.Split(file_entry, ":")[1]
-				user.AccountID = strings.Split(file_entry, ":")[0]
-			} else {
-				if fAccountID == "" {
-					return nil, fmt.Errorf("AccountID not provided in username or CLI argument")
-				}
-				user.UserName = file_entry
-				user.AccountID = fAccountID
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			user, err := parseUserString(line, fAccountID)
+			if err != nil {
+				return nil, err
 			}
 			usernameList = append(usernameList, user)
 		}
 		if err := scanner.Err(); err != nil {
 			return nil, fmt.Errorf("Reading Userfile Failure: %s", err.Error())
 		}
-	} else {
-		var user userDetails
-		res := regexp.MustCompile(`^\d{12}:`)
-		if strings.Contains(userString, "arn:aws:iam::") {
-			user.UserName = strings.Split(userString, ":")[4]
-			user.AccountID = strings.Split(userString, "/")[1]
-		} else if res.FindString(userString) != "" {
-			user.UserName = strings.Split(userString, ":")[1]
-			user.AccountID = strings.Split(userString, ":")[0]
-		} else {
-			if fAccountID == "" {
-				return nil, fmt.Errorf("AccountID not provided in username or CLI argument")
-			}
-			user.UserName = userString
-			user.AccountID = fAccountID
-		}
-		usernameList = append(usernameList, user)
+		return usernameList, nil
 	}
 
+	// Not a file, treat as a string
+	user, err := parseUserString(fUserfile, fAccountID)
+	if err != nil {
+		return nil, err
+	}
+	usernameList = append(usernameList, user)
 	return usernameList, nil
+}
+
+// Helper function to parse a user string into userDetails
+func parseUserString(input string, fAccountID string) (userDetails, error) {
+	var user userDetails
+	input = strings.TrimSpace(input)
+	arnPattern := regexp.MustCompile(`^arn:aws:iam::(\d{12}):user/(.+)$`)
+	colonPattern := regexp.MustCompile(`^(\d{12}):(.+)$`)
+
+	if matches := arnPattern.FindStringSubmatch(input); matches != nil {
+		user.AccountID = matches[1]
+		user.UserName = matches[2]
+	} else if matches := colonPattern.FindStringSubmatch(input); matches != nil {
+		user.AccountID = matches[1]
+		user.UserName = matches[2]
+	} else {
+		if fAccountID == "" {
+			return user, fmt.Errorf("AccountID not provided in username or CLI argument")
+		}
+		user.AccountID = fAccountID
+		user.UserName = input
+	}
+	return user, nil
 }
 
 func readPasswordDetails(fPassfile string) ([]string, error) {
