@@ -104,74 +104,65 @@ func init() {
 	rootCmd.MarkFlagRequired("passfile")
 }
 
+func getArnAccountUsername(userDetails string, accountId string) (accountID, userName string) {
+	arn_res := regexp.MustCompile(`^arn:aws:iam::(\d{12}):user/(.+)$`).FindStringSubmatch(userDetails)
+	combo_res := regexp.MustCompile(`^(\d{12}):(.*)`).FindStringSubmatch(userDetails)
+	if len(arn_res) == 3 {
+		accountID = arn_res[1]
+		userName = arn_res[2]
+	} else if len(combo_res) == 3 {
+		accountID = combo_res[1]
+		userName = combo_res[2]
+	} else {
+		accountID = accountId
+		userName = userDetails
+	}
+
+	if accountID == "" {
+		log.Fatalf("Missing required field(s) \"accountID\" in input: %s", userDetails)
+	}
+	if userName == "" {
+		log.Fatalf("Missing required field(s) \"userName\" in input: %s", userDetails)
+	}
+	return accountID, userName
+}
+
 func readUserDetails(fUserfile string, fAccountID string) ([]userDetails, error) {
 	var usernameList []userDetails
 
-	// Try to open as a file
-	file, err := os.Open(fUserfile)
-	if err == nil {
-		defer file.Close()
-		scanner := bufio.NewScanner(file)
+	userfileHandle, _ := os.Open(fUserfile)
+	if userfileHandle != nil {
+		scanner := bufio.NewScanner(userfileHandle)
 		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line == "" {
-				continue
-			}
-			user, err := parseUserString(line, fAccountID)
-			if err != nil {
-				return nil, err
+			file_entry := scanner.Text()
+			accountID, userName := getArnAccountUsername(file_entry, fAccountID)
+			user := userDetails{
+				UserName:  userName,
+				AccountID: accountID,
 			}
 			usernameList = append(usernameList, user)
 		}
 		if err := scanner.Err(); err != nil {
 			return nil, fmt.Errorf("Reading Userfile Failure: %s", err.Error())
 		}
-		return usernameList, nil
-	}
-
-	// Not a file, treat as a string
-	user, err := parseUserString(fUserfile, fAccountID)
-	if err != nil {
-		return nil, err
-	}
-	usernameList = append(usernameList, user)
-	return usernameList, nil
-}
-
-// Helper function to parse a user string into userDetails
-func parseUserString(input string, fAccountID string) (userDetails, error) {
-	var user userDetails
-	input = strings.TrimSpace(input)
-	arnPattern := regexp.MustCompile(`^arn:aws:iam::(\d{12}):user/(.+)$`)
-	colonPattern := regexp.MustCompile(`^(\d{12}):(.+)$`)
-
-	if matches := arnPattern.FindStringSubmatch(input); matches != nil {
-		user.AccountID = matches[1]
-		user.UserName = matches[2]
-	} else if matches := colonPattern.FindStringSubmatch(input); matches != nil {
-		user.AccountID = matches[1]
-		user.UserName = matches[2]
 	} else {
-		if fAccountID == "" {
-			return user, fmt.Errorf("AccountID not provided in username or CLI argument")
+		accountID, userName := getArnAccountUsername(fUserfile, fAccountID)
+		user := userDetails{
+			UserName:  userName,
+			AccountID: accountID,
 		}
-		user.AccountID = fAccountID
-		user.UserName = input
+		usernameList = append(usernameList, user)
 	}
-	return user, nil
+	defer userfileHandle.Close()
+
+	return usernameList, nil
 }
 
 func readPasswordDetails(fPassfile string) ([]string, error) {
 	var passwordList []string
-	var passString string
 
-	passfileHandle, err := os.Open(fPassfile)
-	if err != nil {
-		passString = fPassfile
-	}
-	defer passfileHandle.Close()
-
-	if len(passString) == 0 {
+	passfileHandle, _ := os.Open(fPassfile)
+	if passfileHandle != nil {
 		scanner := bufio.NewScanner(passfileHandle)
 		for scanner.Scan() {
 			passwordList = append(passwordList, scanner.Text())
@@ -180,8 +171,9 @@ func readPasswordDetails(fPassfile string) ([]string, error) {
 			return nil, fmt.Errorf("Reading Passfile Failure: %s", err.Error())
 		}
 	} else {
-		passwordList = []string{passString}
+		passwordList = []string{fPassfile}
 	}
+	defer passfileHandle.Close()
 
 	return passwordList, nil
 }
